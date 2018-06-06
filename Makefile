@@ -20,7 +20,7 @@ OBJS += $(patsubst %.cpp, $(OBJSDIR)/%.o, $(CPPSRCS))
 
 # compile flag & linking flag   
 CFLAGS += -std=c++11 -g -Wall 
-LDFLAGS += -lgstapp-1.0
+LDFLAGS += -lgstapp-1.0 -lgio-2.0
 
 CFLAGS += `pkg-config --cflags gstreamer-1.0 gstreamer-rtsp-server-1.0 opencv`
 LDFLAGS += `pkg-config --libs gstreamer-1.0 gstreamer-rtsp-server-1.0 opencv`

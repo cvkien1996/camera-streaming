@@ -11,15 +11,31 @@
 
 //compile: g++ -std=c++11 -Wall main.cpp -o main -lgstapp-1.0 `pkg-config --cflags --libs gstreamer-1.0 gstreamer-rtsp-server-1.0 opencv`
 //view stream:
-//   JPEGenc: gst-launch-1.0 -v rtspsrc location=rtsp://192.168.1.2:8554/test latency=10 ! rtpjpegdepay ! jpegparse ! jpegdec ! videoconvert ! ximagesink
-//   H264enc: gst-launch-1.0 -v rtspsrc location=rtsp://192.168.1.2:8554/test latency=10 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! ximagesink
+//   location: rtsp://root:root@127.0.0.1:8555/test 
+//             rtsps://root:root@127.0.0.1:8555/test
+//             rtsp://127.0.0.1:8555/test
+//   JPEGenc: gst-launch-1.0 -v rtspsrc location=rtsp://127.0.0.1:8555/test latency=10 ! rtpjpegdepay ! jpegparse ! jpegdec ! videoconvert ! ximagesink
+//   H264enc: gst-launch-1.0 -v rtspsrc location=rtsp://127.0.0.1:8555/test latency=10 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! ximagesink
 
 /* Includes --------------------------------------------------------------------------------------*/
 
 /* Standard lib */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
 #include <mutex>
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+
+/* Glib */
+#include <gio/gio.h>
 
 /* GStreamer */
 #include <gst/gst.h>
@@ -42,6 +58,23 @@ using namespace cv;
 //#define _x264ENC_
 //#define _OMXH264ENC_
 
+/* define this if you want the resource to only be available when using
+ * user/password as the password */
+#define WITH_AUTH
+
+/* define this if you want the server to use TLS (it will also need WITH_AUTH
+ * to be defined) */
+//#define WITH_TLS
+
+/* define username and password */
+#define MYGST_USERNAME        "root"
+#define MYGST_PASSWORD        "root"
+
+/* define opened port */
+#define MYGST_LOCALPORT       "8555"
+/* define stream path */
+#define MYGST_STREAMPATH      "/test"
+
 /* Private data types ----------------------------------------------------------------------------*/
 
 /* Private variables -----------------------------------------------------------------------------*/
@@ -57,6 +90,9 @@ static Mat g_frameStored;
 static std::mutex g_mtx;
 
 /* Private function prototypes -------------------------------------------------------------------*/
+
+static gchar *
+get_local_ipv4addr (void);
 
 static GstFlowReturn
 new_preroll (GstAppSink * appsink, gpointer data);
@@ -85,6 +121,16 @@ main (int argc, char * argv[])
     GstRTSPMediaFactory * factory;
 
     GError * error = NULL;
+
+#ifdef WITH_AUTH
+    GstRTSPAuth        * auth;
+    GstRTSPToken       * token;
+    gchar              * basic;
+    GstRTSPPermissions * permissions;
+#endif
+#ifdef WITH_TLS
+    GTlsCertificate * cert;
+#endif
 
     /* Init loop */
     gst_init(&argc, &argv);
@@ -133,6 +179,58 @@ main (int argc, char * argv[])
 
     /* Create rtsp server */
     server  = gst_rtsp_server_new();
+    gst_rtsp_server_set_service(server, MYGST_LOCALPORT);
+
+#ifdef WITH_AUTH
+    /* make a new authentication manager. it can be added to control access to all
+       the factories on the server or on individual factories. */
+    auth = gst_rtsp_auth_new ();
+#ifdef WITH_TLS
+    cert = g_tls_certificate_new_from_pem ("-----BEGIN CERTIFICATE-----"
+      "MIICJjCCAY+gAwIBAgIBBzANBgkqhkiG9w0BAQUFADCBhjETMBEGCgmSJomT8ixk"
+      "ARkWA0NPTTEXMBUGCgmSJomT8ixkARkWB0VYQU1QTEUxHjAcBgNVBAsTFUNlcnRp"
+      "ZmljYXRlIEF1dGhvcml0eTEXMBUGA1UEAxMOY2EuZXhhbXBsZS5jb20xHTAbBgkq"
+      "hkiG9w0BCQEWDmNhQGV4YW1wbGUuY29tMB4XDTExMDExNzE5NDcxN1oXDTIxMDEx"
+      "NDE5NDcxN1owSzETMBEGCgmSJomT8ixkARkWA0NPTTEXMBUGCgmSJomT8ixkARkW"
+      "B0VYQU1QTEUxGzAZBgNVBAMTEnNlcnZlci5leGFtcGxlLmNvbTBcMA0GCSqGSIb3"
+      "DQEBAQUAA0sAMEgCQQDYScTxk55XBmbDM9zzwO+grVySE4rudWuzH2PpObIonqbf"
+      "hRoAalKVluG9jvbHI81eXxCdSObv1KBP1sbN5RzpAgMBAAGjIjAgMAkGA1UdEwQC"
+      "MAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDQYJKoZIhvcNAQEFBQADgYEAYx6fMqT1"
+      "Gvo0jq88E8mc+bmp4LfXD4wJ7KxYeadQxt75HFRpj4FhFO3DOpVRFgzHlOEo3Fwk"
+      "PZOKjvkT0cbcoEq5whLH25dHoQxGoVQgFyAP5s+7Vp5AlHh8Y/vAoXeEVyy/RCIH"
+      "QkhUlAflfDMcrrYjsmwoOPSjhx6Mm/AopX4="
+      "-----END CERTIFICATE-----"
+      "-----BEGIN PRIVATE KEY-----"
+      "MIIBVAIBADANBgkqhkiG9w0BAQEFAASCAT4wggE6AgEAAkEA2EnE8ZOeVwZmwzPc"
+      "88DvoK1ckhOK7nVrsx9j6TmyKJ6m34UaAGpSlZbhvY72xyPNXl8QnUjm79SgT9bG"
+      "zeUc6QIDAQABAkBRFJZ32VbqWMP9OVwDJLiwC01AlYLnka0mIQZbT/2xq9dUc9GW"
+      "U3kiVw4lL8v/+sPjtTPCYYdzHHOyDen6znVhAiEA9qJT7BtQvRxCvGrAhr9MS022"
+      "tTdPbW829BoUtIeH64cCIQDggG5i48v7HPacPBIH1RaSVhXl8qHCpQD3qrIw3FMw"
+      "DwIga8PqH5Sf5sHedy2+CiK0V4MRfoU4c3zQ6kArI+bEgSkCIQCLA1vXBiE31B5s"
+      "bdHoYa1BXebfZVd+1Hd95IfEM5mbRwIgSkDuQwV55BBlvWph3U8wVIMIb4GStaH8"
+      "W535W8UBbEg=" "-----END PRIVATE KEY-----", -1, &error);
+
+    if (cert == NULL) 
+    {
+        g_printerr ("failed to parse PEM: %s\n", error->message);
+        return -1;
+    }
+
+    gst_rtsp_auth_set_tls_certificate (auth, cert);
+    g_object_unref (cert);
+#endif
+
+    /* make user token */
+    token = gst_rtsp_token_new (GST_RTSP_TOKEN_MEDIA_FACTORY_ROLE, G_TYPE_STRING, MYGST_USERNAME, NULL);
+    basic = gst_rtsp_auth_make_basic (MYGST_USERNAME, MYGST_PASSWORD);
+    gst_rtsp_auth_add_basic (auth, basic, token);
+    g_free (basic);
+    gst_rtsp_token_unref (token);
+
+    /* configure in the server */
+    gst_rtsp_server_set_auth (server, auth);
+#endif
+
     mounts  = gst_rtsp_server_get_mount_points(server);
     factory = gst_rtsp_media_factory_new();
 
@@ -199,9 +297,22 @@ main (int argc, char * argv[])
 
     /* Install callback function */
     g_signal_connect(factory, "media-configure", (GCallback)media_configure, NULL);
+
+#ifdef WITH_AUTH
+    /* add permissions for the user media role */
+    permissions = gst_rtsp_permissions_new ();
+    gst_rtsp_permissions_add_role (permissions, MYGST_USERNAME,
+                            GST_RTSP_PERM_MEDIA_FACTORY_ACCESS, G_TYPE_BOOLEAN, TRUE,
+                            GST_RTSP_PERM_MEDIA_FACTORY_CONSTRUCT, G_TYPE_BOOLEAN, TRUE, NULL);
+    gst_rtsp_media_factory_set_permissions (factory, permissions);
+    gst_rtsp_permissions_unref (permissions);
+#ifdef WITH_TLS
+    gst_rtsp_media_factory_set_profiles (factory, GST_RTSP_PROFILE_SAVP);
+#endif
+#endif
     
     /* Attach the test factory to the /test url */
-    gst_rtsp_mount_points_add_factory(mounts, "/test", factory);
+    gst_rtsp_mount_points_add_factory(mounts, MYGST_STREAMPATH, factory);
 
     /* Don't need the ref to the mounts anymore */
     g_object_unref(mounts);
@@ -210,7 +321,27 @@ main (int argc, char * argv[])
     gst_rtsp_server_attach(server, NULL);
 
     /* Start serving */
-    g_print("Stream ready at rtsp://127.0.0.1:8554/test\n");
+    gchar * login_username = NULL;
+    gchar * login_password = NULL;
+    gchar * protocol       = "rtsp";
+    gchar * local_ipaddr   = get_local_ipv4addr();
+
+#ifdef WITH_AUTH
+    login_username = g_strdup_printf("%s:", MYGST_USERNAME);
+    login_password = g_strdup_printf("%s@", MYGST_PASSWORD);
+#else
+    login_username = g_strdup_printf("");
+    login_password = g_strdup_printf("");
+#endif
+
+#ifdef WITH_TLS
+    protocol = "rtsps";
+#endif
+
+    g_print ("Stream ready at %s://%s%s%s:%s%s\n", 
+            protocol, login_username, login_password, local_ipaddr, MYGST_LOCALPORT, MYGST_STREAMPATH);
+    g_free(login_username);
+    g_free(login_password);
 
     /* Main loop */
     g_main_loop_run(loop);
@@ -223,6 +354,28 @@ main (int argc, char * argv[])
 }
 
 /* Private function bodies -----------------------------------------------------------------------*/
+
+/* Get local ip */
+static gchar *
+get_local_ipv4addr (void)
+{
+    int fd;
+    struct ifreq ifr;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    /* get an IPv4 IP address */
+    ifr.ifr_addr.sa_family = AF_INET;
+
+    /* IP address attached to "eth0" */
+    strncpy(ifr.ifr_name, "eth0", IFNAMSIZ-1);
+
+    ioctl(fd, SIOCGIFADDR, &ifr);
+
+    close(fd);
+
+    return inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr);
+}
 
 /* Appsink new_preroll callback function */
 static GstFlowReturn
